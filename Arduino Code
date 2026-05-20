@@ -1,0 +1,143 @@
+#define _DEBUG_
+#include <Wire.h>
+#include <Adafruit_INA219.h>
+#include <ThingerESP32.h>
+
+#define USERNAME    "_whitedevil_8009"
+#define DEVICE_ID   "smartbulb"
+#define DEVICE_CRED "3348908877551210"
+
+#define WIFI_SSID   "Trixster 5J"
+#define WIFI_PASS   "spux9994"
+
+Adafruit_INA219 ina219;
+ThingerESP32 thing(USERNAME, DEVICE_ID, DEVICE_CRED);
+
+#define RELAY_PIN 4
+#define PIR_PIN 13
+
+bool bulbState = false;
+bool motionHandled = false;
+
+unsigned long lastToggleTime = 0;
+unsigned long lastPrintTime = 0;
+
+const unsigned long COOLDOWN = 5000;
+const unsigned long PRINT_INTERVAL = 3000;
+
+float voltage = 0;
+float current = 0;
+float power = 0;
+float totalEnergy = 0;
+
+unsigned long bulbOnTime = 0;
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(PIR_PIN, INPUT);
+
+  digitalWrite(RELAY_PIN, HIGH); // Relay OFF initially
+
+  ina219.begin();
+
+  thing.add_wifi(WIFI_SSID, WIFI_PASS);
+
+  thing["voltage"]     >> [](pson& out) { out = voltage; };
+  thing["current"]     >> [](pson& out) { out = current; };
+  thing["power"]       >> [](pson& out) { out = power; };
+  thing["totalEnergy"] >> [](pson& out) { out = totalEnergy; };
+  thing["bulbState"]   >> [](pson& out) { out = bulbState ? 1 : 0; };
+
+  Serial.println("Warming up... 5 seconds");
+  delay(5000);
+  Serial.println("READY!");
+}
+
+void loop() {
+
+  thing.handle();
+
+  unsigned long now = millis();
+  int pir = digitalRead(PIR_PIN);
+
+  // ===== MOTION DETECTION =====
+  if (pir == HIGH && !motionHandled && (now - lastToggleTime > COOLDOWN)) {
+
+    delay(10);
+    if (digitalRead(PIR_PIN) == HIGH) {
+      delay(10);
+      if (digitalRead(PIR_PIN) == HIGH) {
+
+        bulbState = !bulbState;
+        digitalWrite(RELAY_PIN, bulbState ? LOW : HIGH);
+
+        Serial.println(bulbState ? "BULB ON" : "BULB OFF");
+
+        if (bulbState) {
+          // Bulb turned ON
+          bulbOnTime = now;
+        } else {
+          // Bulb turned OFF → add final energy
+          float sessionHours = (now - bulbOnTime) / 3600000.0;
+          totalEnergy += power * sessionHours;
+        }
+
+        motionHandled = true;
+        lastToggleTime = now;
+      }
+    }
+  }
+
+  if (pir == LOW && (now - lastToggleTime > COOLDOWN)) {
+    motionHandled = false;
+  }
+
+  // ===== SENSOR READ + ENERGY CALCULATION =====
+  if (now - lastPrintTime > PRINT_INTERVAL) {
+
+    voltage = ina219.getBusVoltage_V();
+    current = abs(ina219.getCurrent_mA());
+if (bulbState) {
+  power = 0.5;   // your bulb watt
+} else {
+  power = 0.0;
+}
+
+    // Accumulate energy ONLY when bulb is ON
+    if (bulbState) {
+      float sessionHours = (now - bulbOnTime) / 3600000.0;
+      totalEnergy += power * sessionHours;
+      bulbOnTime = now;
+    }
+
+    // ===== STREAM DATA =====
+
+    // Send real values when ON, zero when OFF
+    if (bulbState) {
+      thing.stream(thing["current"]);
+      thing.stream(thing["power"]);
+    } else {
+      current = 0;
+      power = 0;
+      thing.stream(thing["current"]);
+      thing.stream(thing["power"]);
+    }
+
+    thing.stream(thing["voltage"]);
+    thing.stream(thing["totalEnergy"]);
+    thing.stream(thing["bulbState"]);
+
+    // ===== SERIAL DEBUG =====
+    Serial.print("Voltage: "); Serial.print(voltage);
+    Serial.print(" V | Current: "); Serial.print(current);
+    Serial.print(" mA | Power: "); Serial.print(power);
+    Serial.print(" W | Energy: "); Serial.print(totalEnergy);
+    Serial.print(" Wh | Bulb: "); Serial.print(bulbState ? "ON" : "OFF");
+    Serial.print(" | Connected: ");
+    Serial.println(thing.is_connected() ? "YES" : "NO");
+
+    lastPrintTime = now;
+  }
+}
